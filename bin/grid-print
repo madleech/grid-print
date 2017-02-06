@@ -59,6 +59,7 @@ function api(req, res, next) {
 			setCORSHeaders(req, res);
 			res.end(encode(setup.targets));
 			break;
+		
 		case "check":
 			queueData = queued[req.gs.query.key];
 			setCORSHeaders(req, res);
@@ -74,6 +75,7 @@ function api(req, res, next) {
 				}
 			));
 			break;
+		
 		case "wait":
 			queueData = queued[req.gs.query.key];
 			setCORSHeaders(req, res);
@@ -88,6 +90,7 @@ function api(req, res, next) {
 				}));
 			}
 			break;
+		
 		case "print":
 			if (req.method !== 'POST') return next();
 			if (!req.gs.query.filename) return next();
@@ -131,6 +134,7 @@ function api(req, res, next) {
 			});
 
 			break;
+		
 		default:
 			next();
 	}
@@ -148,38 +152,31 @@ function tempFileName() {
 	return tempDir + "/" + (new Date().getTime().toString(36)) + "-" + (tempIndex++) + ".tmp";
 }
 
-function postFile(host, queueData) {
-	console.log({
-		key: queueData.key,
-		postTo: host
-	});
+function sendFileToLinuxCNC(host, queueData) {
+	// update queue status
 	queueData.status = "posting";
-	var form = new FormData(),
-		req;
-	form.append("file", queueData.data, queueData.filename);
-	form.append("submit", "submit");
-	var track = progress();
-	req = form.submit("http://" + host + "/upload.cgi", function(err, res) {
-		if (res) res.resume();
-		if (err) {
-			console.log({
-				key: queueData.key,
-				err: err
-			});
-			queueData.error = true;
-			queueData.status = err.toString();
-		} else {
-			console.log(encode({
-				key: queueData.key,
-				done: true
-			}));
-			queueData.status = "complete";
-		}
+	
+	// create a filename if one wasn't provided
+	filename = tempDir + "/" + (queueData.filename || "" + (queueData.target.name || queueData.target.host) + queueData.key) + ".ngc";
+	
+	// write the file out
+	fs.writeFileSync(filename, queueData.data);
+	
+	// run axis-remote
+	proc = spawn('axis-remote', [filename], {shell: true});
+	
+	// handle responses
+	proc.stdout.on('data', function(data) { console.log("Data: " + data); });
+	proc.stderr.on('data', function(err) { console.log("Error: " + err); });
+	proc.on('exit', () => {
 		queueData.data = null;
 		queueData.done = true;
+		queueData.progress = 100;
+		
 		setTimeout(function() {
 			delete queued[queueData.key];
 		}, 600000);
+		
 		queueData.waiting.forEach(function(res) {
 			res.end(encode({
 				key: queueData.key,
@@ -188,10 +185,11 @@ function postFile(host, queueData) {
 				status: queueData.status
 			}));
 		});
-	}, track);
-	track.on('progress', function(progress) {
-		queueData.progress = progress.percentage;
-		// console.log(progress);
+	});
+	proc.on('error', (err) => {
+		console.log("Error: " + err);
+		queueData.error = true;
+		queueData.status = err.toString();
 	});
 }
 
@@ -231,7 +229,7 @@ function printTarget(queueData) {
 			try {
 				queueData.filename = fname;
 				queueData.data = fs.readFileSync(fout);
-				postFile(pt.host, queueData);
+				sendFileToLinuxCNC(pt.host, queueData);
 			} catch (e) {
 				queueData.done = true;
 				queueData.error = true;
@@ -241,7 +239,7 @@ function printTarget(queueData) {
 			fs.unlink(fout);
 		});
 	} else {
-		postFile(pt.host, queueData);
+		sendFileToLinuxCNC(pt.host, queueData);
 	}
 }
 
